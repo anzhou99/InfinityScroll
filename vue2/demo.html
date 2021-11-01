@@ -1,0 +1,328 @@
+<!--
+ * @Author: 汝星星
+ * @Date: 2021-09-26 09:24:49
+ * @Description: 循环滚动虚拟列表
+-->
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Document</title>
+    <style>
+      #app {
+        width: 300px;
+        height: 200px;
+      }
+      .parent {
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+      }
+      .item {
+        width: 100%;
+        text-align: center;
+      }
+      .slot {
+        width: 100%;
+        font-weight: bold;
+        line-height: 50px;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <div class="parent">
+        <div class="container" id="target">
+          <div
+            class="item"
+            v-for="v,i in [...virtualList]"
+            :key="i"
+            :style="{backgroundColor:v.bgColor}"
+          >
+            <div class="slot" :style="{height:childHeight+'px'}">{{v.label}}</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <script src="https://cdn.jsdelivr.net/npm/vue@2.6.14"></script>
+    <script>
+      const bgColors = ['goldenrod', 'teal', 'springgreen', 'darkgray', 'red'];
+
+      const prop = {
+        list: Object.freeze(
+          Array(23)
+            .fill(0)
+            .map((v, i) => ({
+              label: i,
+              bgColor: bgColors[i % 5],
+            }))
+        ),
+        virtualListLen: 6, //
+        childHeight: 50,
+        translatePxFPS: 2,
+      };
+
+      new Vue({
+        el: '#app',
+
+        data() {
+          return {
+            list: prop.list, //原始列表
+            listIndex: -1, //原始列表首元素坐标(-1代表倒数第一个)
+            virtualList: [], //虚拟列表
+            virtualListIndex: 0, //待改变的虚拟列表坐标
+            virtualListLen: prop.virtualListLen, //虚拟列表长度（长度=隐藏头*1+可视区域长度+隐藏尾*1）
+
+            targetEl: null, //虚拟列表容器元素
+
+            children: null, //列表项元素集合
+            childHeight: prop.childHeight, //列表项单个高度
+
+            animateIndex: null, //requestAnimationFrame ID,用于清除
+            canMove: false, //列表是否可滚动
+
+            translateYArr: null, //各列表项对应的Y方向translateY值
+            originalYArr: null, //translateYArr在拖拽开始前的状态副本
+
+            upperLimits: [], //各项对应上限列表
+            lowerLimits: [], //各项对应下限列表
+
+            canDrag: false, //列表是否可拖拽
+            dragStartY: 0, //鼠标拖拽开始时的Y坐标
+
+            sumOffsetY: 0, //Y方向累计的拖拽偏移量
+            originalSumOffsetY: 0, //sumOffsetY在拖拽开始前的状态副本
+
+            translatePxFPS: prop.translatePxFPS, //每帧偏移量(px,-为向下，+为向上)
+          };
+        },
+
+        watch: {
+          sumOffsetY(n) {
+            //向上滚动
+            if (n < -this.childHeight / 2) {
+              this.handleIndexOverflow(true);
+              return;
+            }
+            //向下滚动
+            if (n > this.childHeight / 2) {
+              this.handleIndexOverflow(false);
+              return;
+            }
+          },
+        },
+
+        mounted() {
+          this.initTargetEl();
+          this.initChildren();
+
+          this.initVirtualList();
+          this.initLimits();
+
+          this.addListener();
+          this.move();
+        },
+
+        methods: {
+          //获取目标元素
+          initTargetEl() {
+            this.targetEl = Object.freeze(document.querySelector('#target'));
+            this.targetEl.style.transform = `matrix(1, 0, 0, 1, 0, -${this.childHeight}`;
+          },
+
+          //获取列表项元素集合
+          initChildren() {
+            this.$nextTick(() => {
+              this.children = this.targetEl.children;
+            });
+            this.translateYArr = Array(this.virtualListLen).fill(0);
+          },
+
+          //创建虚拟列表
+          initVirtualList() {
+            const list = this.list;
+            //初始状态：[原列表尾元素,原列表[0],原列表[1]···]
+            this.virtualList = [list[list.length - 1], ...list.slice(0, this.virtualListLen - 1)];
+          },
+
+          //创建上下限列表
+          initLimits() {
+            this.upperLimits = Object.freeze(
+              this.virtualList.map((v, i) => -(i + 1) * this.childHeight + this.childHeight / 2)
+            );
+
+            this.lowerLimits = Object.freeze(
+              this.upperLimits.map(v => this.childHeight * this.virtualListLen + v)
+            );
+          },
+
+          //布局边界溢出情况处理：大于下限或小于下限时调换位置(视图层核心代码)
+          handleLayoutOverflow(i) {
+            const value = this.translateYArr[i];
+            if (value <= this.upperLimits[i]) {
+              this.setTranslate(i, value + this.childHeight * this.virtualListLen);
+              return;
+            }
+            if (value > this.lowerLimits[i]) {
+              this.setTranslate(i, value - this.childHeight * this.virtualListLen);
+              return;
+            }
+          },
+
+          //列表边界溢出情况处理：超出列表范围时衔头/衔尾(状态层核心代码)
+          handleIndexOverflow(isUpRoll) {
+            let index = null;
+            let value = null;
+
+            if (isUpRoll) {
+              //向上滚动时
+              this.sumOffsetY += this.childHeight;
+              this.originalSumOffsetY += this.childHeight;
+              this.listIndex += 1;
+
+              const remainder = this.listIndex % this.list.length;
+              if (remainder < -this.virtualListLen + 1) {
+                value = this.list[remainder + this.virtualListLen - 1 + this.list.length];
+              } else if (remainder >= -this.virtualListLen + 1 + this.list.length) {
+                value = this.list[remainder + this.virtualListLen - 1 - this.list.length];
+              } else {
+                value = this.list[remainder + this.virtualListLen - 1];
+              }
+
+              this.setVirtual(this.virtualListIndex, value);
+              this.virtualListIndex = (this.virtualListIndex + 1) % this.virtualListLen;
+            } else {
+              //向下滚动时
+              this.sumOffsetY -= this.childHeight;
+              this.originalSumOffsetY -= this.childHeight;
+              this.listIndex -= 1;
+
+              const remainder = this.listIndex % this.list.length;
+              if (remainder >= 0) {
+                value = this.list[remainder];
+              } else {
+                value = this.list[remainder + this.list.length];
+              }
+
+              this.virtualListIndex = (this.virtualListIndex - 1) % this.virtualListLen;
+              this.setVirtual(this.virtualListIndex, value);
+            }
+          },
+
+          //启用动画
+          animate() {
+            if (!this.canMove) return;
+
+            this.changeVirtualList();
+            this.sumOffsetY -= this.translatePxFPS;
+
+            this.setAnimationFrame();
+          },
+
+          //设置单项的视图值
+          setTranslate(i, value) {
+            this.translateYArr.splice(i, 1, value);
+          },
+
+          //设置单项的状态值
+          setVirtual(i, value) {
+            this.virtualList.splice(i, 1, value);
+          },
+
+          //调整虚拟列表：改变元素translate值
+          changeVirtualList() {
+            const func = () => {
+              this.translateYArr.forEach((v, i) => {
+                this.setTranslate(i, v - this.translatePxFPS);
+
+                this.handleLayoutOverflow(i);
+                this.changeTransform(i);
+              });
+            };
+            this.$nextTick(func);
+          },
+
+          //设置AnimationFrame，如已有则先清除
+          setAnimationFrame() {
+            this.animateIndex && cancelAnimationFrame(this.animateIndex);
+            this.animateIndex = requestAnimationFrame(this.animate);
+          },
+
+          //滚动开始
+          move() {
+            this.canMove = true;
+            this.animate();
+          },
+
+          //滚动停止
+          stopMove() {
+            this.canMove = false;
+          },
+
+          //拖拽开始
+          drag() {
+            this.canDrag = true;
+          },
+
+          //拖拽停止
+          stopDrag() {
+            this.canDrag = false;
+          },
+
+          //为项元素设置对应的translate值
+          changeTransform(i) {
+            const el = this.children[i];
+
+            el.style.transform = `matrix(1,0,0,1,${0},${this.translateYArr[i]})`;
+          },
+
+          //拖拽开始：
+          dragStartEvent(e) {
+            this.drag();
+
+            this.dragStartY = e.y;
+
+            this.originalYArr = this.translateYArr.slice();
+
+            this.originalSumOffsetY = this.sumOffsetY;
+          },
+
+          //拖拽中：
+          draggingEvent(e) {
+            if (!this.canDrag) return;
+
+            const offsetY = e.y - this.dragStartY;
+
+            this.sumOffsetY = this.originalSumOffsetY + offsetY;
+
+            this.translateYArr.forEach((v, i) => {
+              this.setTranslate(i, this.originalYArr[i] + offsetY);
+              this.setTranslate(i, this.originalYArr[i] + offsetY);
+
+              this.handleLayoutOverflow(i);
+              this.changeTransform(i);
+            });
+          },
+
+          //鼠标移出：拖拽停止，滚动开始
+          mouseleaveEvent() {
+            this.stopDrag();
+            this.move();
+          },
+
+          //在容器元素上监听拖拽相关事件
+          addListener() {
+            this.targetEl.addEventListener('mousedown', e => this.dragStartEvent(e));
+            this.targetEl.addEventListener('mousemove', e => this.draggingEvent(e));
+            this.targetEl.addEventListener('mouseup', this.stopDrag);
+            this.targetEl.addEventListener('mouseenter', this.stopMove);
+            this.targetEl.addEventListener('mouseleave', this.mouseleaveEvent);
+            this.targetEl.addEventListener('dragend', this.stopDrag);
+          },
+        },
+      });
+    </script>
+  </body>
+</html>
